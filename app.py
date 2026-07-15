@@ -1,17 +1,3 @@
-#%%writefile insurance_agent.py
-"""
-Core LangGraph agent for insurance claims adjudication.
-Import this from app.py - do not run directly.
-
-Graph flow:
-START -> validate_claim -> build_query -> retrieve -> grade_relevance
-       -> [rewrite_query -> retrieve]*        (max 2 retrieval retries, hard-capped)
-       -> [web_fallback -> escalate_insufficient_evidence]   (if evidence still weak)
-       -> decide -> check_grounding
-       -> [increment_decision_retry -> decide]  (max 1 re-decision attempt)
-       -> [escalate_ungrounded]
-       -> finalize (writes audit log + human-review queue) -> END
-"""
 import os
 import re
 from typing import TypedDict, List, Optional, Literal
@@ -58,14 +44,27 @@ def sanitize_text(text: str) -> str:
 # ---------- Schemas ----------
 class ClaimInput(BaseModel):
     """Structured, validated representation of an incoming claim request."""
-    claim_query: str = Field(..., min_length=10, max_length=2000,
-                              description="Free-text description of what happened and what coverage is being asked about")
+    claim_query: str = Field(
+        ..., 
+        min_length=10, 
+        max_length=2000,
+        description="Free-text description of what happened and what coverage is being asked about"
+    )
     policy_type: Optional[Literal["auto", "health", "home", "other"]] = Field(
-        default=None, description="Type of policy this claim falls under, if known")
+        default=None, 
+        description="Type of policy this claim falls under, if known"
+    )
     policy_number: Optional[str] = Field(default=None, max_length=50)
     claimant_name: Optional[str] = Field(default=None, max_length=200)
-    date_of_loss: Optional[str] = Field(default=None, description="Date of loss, if known (any readable format)")
-    claimed_amount: Optional[float] = Field(default=None, ge=0, description="Dollar amount being claimed, if known")
+    date_of_loss: Optional[str] = Field(
+        default=None, 
+        description="Date of loss, if known (any readable format)"
+    )
+    claimed_amount: Optional[float] = Field(
+        default=None, 
+        ge=0, 
+        description="Dollar amount being claimed, if known"
+    )
 
     @field_validator("claim_query")
     @classmethod
@@ -212,6 +211,7 @@ def build_vectorstore_from_files(file_paths: List[str]) -> FAISS:
     for i, chunk in enumerate(chunks):
         source = os.path.basename(chunk.metadata.get("source", "unknown"))
         chunk.metadata["clause_id"] = f"{source}::chunk_{i}"
+    
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     return FAISS.from_documents(chunks, embeddings)
 
@@ -288,23 +288,36 @@ def build_claims_graph(groq_api_key: str):
 
     def rewrite_query_node(state):
         new_query = rewrite_chain.invoke({
-            "claim_query": state["claim_query"], "search_query": state["search_query"],
+            "claim_query": state["claim_query"], 
+            "search_query": state["search_query"],
             "grade_reasoning": state["relevance_grade"].reasoning,
         }).content.strip()
-        return {"search_query": new_query, "query_history": state["query_history"] + [new_query],
-                "retry_count": state["retry_count"] + 1}
+        return {
+            "search_query": new_query, 
+            "query_history": state["query_history"] + [new_query],
+            "retry_count": state["retry_count"] + 1
+        }
 
     def web_regulation_fallback_node(state):
         if not state["enable_web_fallback"] or state["tavily_client"] is None:
             return {"web_search_results": []}
+        
         query = f"insurance regulation coverage requirements: {state['claim_query']}"
         try:
             response = state["tavily_client"].search(
-                query=query, max_results=3, search_depth="basic",
+                query=query, 
+                max_results=3, 
+                search_depth="basic",
                 include_domains=AUTHORITATIVE_INSURANCE_DOMAINS,
             )
-            results = [{"title": sanitize_text(r["title"]), "url": r["url"], "snippet": sanitize_text(r["content"][:300])}
-                       for r in response.get("results", [])]
+            results = [
+                {
+                    "title": sanitize_text(r["title"]), 
+                    "url": r["url"], 
+                    "snippet": sanitize_text(r["content"][:300])
+                }
+                for r in response.get("results", [])
+            ]
         except Exception:
             results = []
         return {"web_search_results": results}
@@ -317,7 +330,8 @@ def build_claims_graph(groq_api_key: str):
     def check_grounding_node(state):
         context = format_docs_for_grading(state["retrieved_docs"])
         grade = hallucination_chain.invoke({
-            "retrieved_context": context, "verdict": state["decision"].verdict,
+            "retrieved_context": context, 
+            "verdict": state["decision"].verdict,
             "decision_reasoning": state["decision"].reasoning,
             "cited_clause_ids": state["decision"].cited_clause_ids,
         })
@@ -347,14 +361,18 @@ def build_claims_graph(groq_api_key: str):
     def finalize_node(state):
         requires_human_review = state["decision"].verdict == "escalate"
         priority = _escalation_priority(state.get("claim_input")) if requires_human_review else None
+        
         record = AuditRecord(
-            claim_id=state["claim_id"], claim_query=state["claim_query"],
-            verdict=state["decision"].verdict, reasoning=state["decision"].reasoning,
+            claim_id=state["claim_id"], 
+            claim_query=state["claim_query"],
+            verdict=state["decision"].verdict, 
+            reasoning=state["decision"].reasoning,
             relevance_confidence=state["relevance_grade"].confidence if state["relevance_grade"] else None,
             hallucination_confidence=state["hallucination_grade"].confidence if state["hallucination_grade"] else None,
             cited_clause_ids=state["decision"].cited_clause_ids,
             retrieved_clause_ids=[d.metadata["clause_id"] for d in state["retrieved_docs"]],
-            search_queries_tried=state["query_history"], retry_count=state["retry_count"],
+            search_queries_tried=state["query_history"], 
+            retry_count=state["retry_count"],
             web_sources_consulted=state["web_search_results"],
             requires_human_review=requires_human_review,
             escalation_priority=priority,
@@ -363,11 +381,14 @@ def build_claims_graph(groq_api_key: str):
             prompt_version=PROMPT_VERSION,
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
+        
         with open(AUDIT_LOG_PATH, "a") as f:
             f.write(record.model_dump_json() + "\n")
+            
         if requires_human_review:
             with open(HUMAN_REVIEW_QUEUE_PATH, "a") as f:
                 f.write(record.model_dump_json() + "\n")
+                
         return {"audit_record": record.model_dump()}
 
     # ----- Routing -----
@@ -456,20 +477,21 @@ def adjudicate(graph, claim_id, claim_query, vectorstore, tavily_client,
         "search_query": claim_query,
         "query_history": [],
         "vectorstore": vectorstore,
-        "retrieved_docs": [], "relevance_grade": None,
-        "retry_count": 0, "max_retries": max_retries, "relevance_threshold": relevance_threshold,
-        "decision": None, "hallucination_grade": None, "decision_retry_count": 0,
-        "hallucination_threshold": hallucination_threshold, "audit_record": None,
-        "enable_web_fallback": enable_web_fallback, "tavily_client": tavily_client,
+        "retrieved_docs": [],
+        "relevance_grade": None,
+        "retry_count": 0,
+        "max_retries": max_retries,
+        "relevance_threshold": relevance_threshold,
+        "decision": None,
+        "hallucination_grade": None,
+        "decision_retry_count": 0,
+        "hallucination_threshold": hallucination_threshold,
+        "audit_record": None,
+        "enable_web_fallback": enable_web_fallback,
+        "tavily_client": tavily_client,
         "web_search_results": [],
     })
-	
-	
-	
-	
-#----app.py
 
-#%%writefile app.py
 import streamlit as st
 import os, uuid
 import pandas as pd
@@ -544,13 +566,13 @@ def send_claim_email(record):
     # Send Email (Mocked for safety since sample credentials are used)
     try:
         # To make this live, uncomment below and use a real SMTP server:
-          server = smtplib.SMTP('smtp.gmail.com', 587)
-          server.starttls()
-          # Use the app_password here, NOT your regular gmail password
-          server.login(sender_email, app_password) 
-          server.sendmail(sender_email, receiver_email, msg.as_string())
-          server.quit()
-          return True, f"Email successfully sent to {receiver_email}"
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        # Use the app_password here, NOT your regular gmail password
+        server.login(sender_email, app_password) 
+        server.sendmail(sender_email, receiver_email, msg.as_string())
+        server.quit()
+        return True, f"Email successfully sent to {receiver_email}"
     except Exception as e:
         return False, str(e)
 
@@ -569,7 +591,7 @@ with st.sidebar:
     relevance_threshold = st.slider("Relevance threshold", 0.0, 1.0, 0.7, 0.05)
     hallucination_threshold = st.slider("Grounding threshold", 0.0, 1.0, 0.7, 0.05)
     max_retries = st.slider("Max retrieval retries", 0, 2, 2,
-                             help="Hard-capped at 2 by the agent regardless of this setting.")
+                            help="Hard-capped at 2 by the agent regardless of this setting.")
     enable_web_fallback = st.checkbox("Enable web regulation fallback", value=bool(tavily_key))
 
     st.header("📄 Policy Documents")
@@ -599,6 +621,7 @@ if build_index:
             with open(path, "wb") as out:
                 out.write(f.getbuffer())
             paths.append(path)
+        
         with st.spinner("Chunking and embedding documents (Cleaning ASCII data)..."):
             try:
                 st.session_state.vectorstore = build_vectorstore_from_files(paths)
@@ -616,7 +639,7 @@ if tavily_key:
 
 st.subheader("Submit a claim")
 claim_query = st.text_area("Describe the claim scenario", height=100,
-                            placeholder="e.g. Customer's basement flooded because a pipe burst under the sink...")
+                           placeholder="e.g. Customer's basement flooded because a pipe burst under the sink...")
 
 with st.expander("➕ Additional claim details (optional)"):
     col1, col2 = st.columns(2)
@@ -713,4 +736,4 @@ if st.session_state.history:
         file_name="session_claim_history.csv",
         mime="text/csv",
         type="secondary"
-    )
+    )				   
