@@ -1,4 +1,4 @@
-%%writefile insurance_agent.py
+#%%writefile insurance_agent.py
 """
 Core LangGraph agent for insurance claims adjudication.
 Import this from app.py - do not run directly.
@@ -469,7 +469,7 @@ def adjudicate(graph, claim_id, claim_query, vectorstore, tavily_client,
 	
 #----app.py
 
-%%writefile app.py
+#%%writefile app.py
 import streamlit as st
 import os, uuid
 import pandas as pd
