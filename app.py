@@ -499,10 +499,10 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-from insurance_agent import (
-    build_claims_graph, build_vectorstore_from_files, adjudicate,
-    AUDIT_LOG_PATH, HUMAN_REVIEW_QUEUE_PATH,
-)
+#from insurance_agent import (
+    #build_claims_graph, build_vectorstore_from_files, adjudicate,
+    #AUDIT_LOG_PATH, HUMAN_REVIEW_QUEUE_PATH,
+#)
 
 # ----------------- EMAIL NOTIFICATION FEATURE -----------------
 def send_claim_email(record):
